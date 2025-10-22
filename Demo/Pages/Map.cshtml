@@ -1,0 +1,28 @@
+﻿@page
+@model MapModel
+@{
+    ViewData["Title"] = "Revolutions Map";
+}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<div id="map" style="height: 700px;"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(async function() {
+    const map = L.map('map').setView([20, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const res = await fetch('/api/revolutions');
+    const data = await res.json();
+
+    data.forEach(item => {
+        if (item.latitude && item.longitude) {
+            const popup = `<strong>${item.name}</strong><br/>${new Date(item.startDate).getFullYear()} - ${item.endDate ? new Date(item.endDate).getFullYear() : ''}<br/>${item.country || ''}<br/><a href="https://www.wikidata.org/wiki/${item.wikidataId}" target="_blank">Wikidata</a>`;
+            L.marker([item.latitude, item.longitude]).addTo(map).bindPopup(popup);
+        }
+    });
+})();
+</script>
