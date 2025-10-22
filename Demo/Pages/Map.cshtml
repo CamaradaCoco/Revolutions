@@ -1,5 +1,5 @@
-﻿@page
-@model MapModel
+﻿@page "/"
+@model Demo.Pages.MapModel
 @{
     ViewData["Title"] = "Revolutions Map";
 }
@@ -15,7 +15,12 @@
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    const res = await fetch('/api/revolutions');
+    const apiUrl = '@Url.Content("~/api/revolutions")';
+    const res = await fetch(apiUrl);
+    if (!res.ok) {
+        console.error('Fetch failed', res.status, await res.text());
+        return;
+    }
     const data = await res.json();
 
     data.forEach(item => {
