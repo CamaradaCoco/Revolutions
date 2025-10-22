@@ -32,15 +32,14 @@ using (var scope = app.Services.CreateScope())
     {
         db.Database.Migrate();
 
-        // Import from Wikidata (best effort)
         try
         {
-            await WikidataImporter.FetchAndImportAsync(db);
+            var imported = await WikidataImporter.FetchAndImportAsync(db);
+            Console.WriteLine($"WikidataImporter: imported {imported} items.");
         }
         catch (Exception ex)
         {
-            // log import failure but don't crash startup
-            Console.Error.WriteLine("Wikidata import failed: " + ex.Message);
+            Console.Error.WriteLine("Wikidata import failed: " + ex);
         }
     }
     catch (Exception ex)

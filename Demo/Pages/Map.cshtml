@@ -78,7 +78,11 @@
                             }
                         }
 
-                        L.popup({ maxWidth: 450 }).setLatLng(e.latlng).setContent(content).openOn(map);
+                        // Open popup at click location
+                        L.popup({ maxWidth: 450 })
+                            .setLatLng(e.latlng)
+                            .setContent(content)
+                            .openOn(map);
                     }
                 });
             }
