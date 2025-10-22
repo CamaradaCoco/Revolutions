@@ -14,16 +14,17 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
 
-        // Query: revolutions (wd:Q10931) since 2000, ordered by country then date.
-        // {limit} will be replaced by the caller for testing/paging.
+        // Query: revolutions (wd:Q10931) since 1950 — now returns country ISO (P297)
         private const string SparqlTemplate = @"#replaceLineBreaks
-SELECT DISTINCT ?revolution ?revolutionLabel ?country ?countryLabel ?startDate ?qid WHERE {
+SELECT DISTINCT ?revolution ?revolutionLabel ?country ?countryLabel ?countryIso ?startDate ?qid WHERE {
   ?revolution wdt:P31/wdt:P279* wd:Q10931 .
-  ?revolution wdt:P17 ?country .
+  OPTIONAL { ?revolution wdt:P17 ?country .
+             OPTIONAL { ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }
+             OPTIONAL { ?country wdt:P297 ?countryIso. }
+  }
   OPTIONAL { ?revolution wdt:P580 ?startDate. }
   BIND(STRAFTER(STR(?revolution), 'http://www.wikidata.org/entity/') AS ?qid)
-  ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') .
-  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 2000)
+  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1950)
   SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
 }
 ORDER BY ?countryLabel ?startDate
@@ -89,7 +90,7 @@ LIMIT {limit}";
                 {
                     var b = bindingArray[i];
                     string sval(string n) => b.TryGetProperty(n, out var el) && el.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
-                    Console.WriteLine($"sample[{i}]: qid={sval("qid")} label={sval("revolutionLabel")} start={sval("startDate")} countryLabel={sval("countryLabel")}");
+                    Console.WriteLine($"sample[{i}]: qid={sval("qid")} label={sval("revolutionLabel")} start={sval("startDate")} countryLabel={sval("countryLabel")} countryIso={sval("countryIso")}");
                 }
 
                 var imported = 0;
@@ -105,11 +106,16 @@ LIMIT {limit}";
                     var qid = get(b, "qid");
                     var label = get(b, "revolutionLabel");
                     var startStr = get(b, "startDate");
+                    var endStr = get(b, "end");
                     var countryLabel = get(b, "countryLabel");
+                    var countryIso = get(b, "countryIso");
+                    var latStr = get(b, "lat");
+                    var lonStr = get(b, "lon");
 
+                    // require qid and start date for deterministic upsert
                     if (string.IsNullOrWhiteSpace(qid))
                     {
-                        Console.Error.WriteLine("Skipping binding with no qid (ambiguous): label=" + label);
+                        Console.Error.WriteLine("Skipping binding with no qid (ambiguous): itemLabel=" + label);
                         continue;
                     }
                     if (!DateTime.TryParse(startStr, out var startDate))
@@ -118,7 +124,12 @@ LIMIT {limit}";
                         continue;
                     }
 
-                    DateTime? endDate = null; // query didn't request end; keep null
+                    DateTime? endDate = null;
+                    if (DateTime.TryParse(endStr, out var tmp)) endDate = tmp;
+
+                    double? lat = null, lon = null;
+                    if (double.TryParse(latStr, out var la)) lat = la;
+                    if (double.TryParse(lonStr, out var lo)) lon = lo;
 
                     // Upsert by WikidataId (qid)
                     Revolution? entity = await db.Revolutions.FirstOrDefaultAsync(r => r.WikidataId == qid, ct);
@@ -128,13 +139,14 @@ LIMIT {limit}";
                         db.Revolutions.Add(entity);
                     }
 
+                    // store authoritative fields
                     entity.Name = string.IsNullOrWhiteSpace(label) ? qid : label;
                     entity.StartDate = startDate;
                     entity.EndDate = endDate;
                     entity.Country = countryLabel ?? string.Empty;
-                    entity.CountryIso = null;
-                    entity.Latitude = null;
-                    entity.Longitude = null;
+                    entity.CountryIso = string.IsNullOrWhiteSpace(countryIso) ? null : countryIso.ToUpperInvariant();
+                    entity.Latitude = lat;
+                    entity.Longitude = lon;
                     entity.Description = string.Empty;
                     entity.Type = "Revolution/Uprising";
                     entity.Sources = "Wikidata";
