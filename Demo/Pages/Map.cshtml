@@ -17,12 +17,9 @@
 
     const apiUrl = '@Url.Content("~/api/revolutions")';
 
-    // load the event markers (existing behaviour)
+    // load markers (existing)
     const res = await fetch(apiUrl);
-    if (!res.ok) {
-        console.error('Fetch failed', res.status, await res.text());
-        return;
-    }
+    if (!res.ok) { console.error('Fetch failed', res.status, await res.text()); return; }
     const data = await res.json();
     const markerLayer = L.layerGroup().addTo(map);
     data.forEach(item => {
@@ -32,54 +29,37 @@
         }
     });
 
-    // load country GeoJSON and wire up click handler
-    // Source: datasets/geo-countries (raw github). You may swap to another reliable source if needed.
+    // load country GeoJSON and click -> fetch by ISO if available
     const geojsonUrl = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson';
     try {
         const g = await fetch(geojsonUrl);
-        if (!g.ok) {
-            console.warn('Could not load country GeoJSON', g.status);
-            return;
-        }
+        if (!g.ok) { console.warn('Could not load country GeoJSON', g.status); return; }
         const countries = await g.json();
 
-        function styleDefault() {
-            return {
-                color: '#3388ff',
-                weight: 1,
-                fillColor: '#3388ff',
-                fillOpacity: 0.05
-            };
-        }
-        function styleHighlight() {
-            return {
-                color: '#ff7800',
-                weight: 2,
-                fillColor: '#ffecb3',
-                fillOpacity: 0.35
-            };
-        }
+        function styleDefault() { return { color: '#3388ff', weight: 1, fillColor: '#3388ff', fillOpacity: 0.05 }; }
+        function styleHighlight() { return { color: '#ff7800', weight: 2, fillColor: '#ffecb3', fillOpacity: 0.35 }; }
 
         let countryLayer = L.geoJSON(countries, {
             style: styleDefault,
             onEachFeature: (feature, layer) => {
                 layer.on({
-                    mouseover: (e) => {
-                        e.target.setStyle(styleHighlight());
-                    },
-                    mouseout: (e) => {
-                        countryLayer.resetStyle(e.target);
-                    },
+                    mouseover: (e) => e.target.setStyle(styleHighlight()),
+                    mouseout: (e) => countryLayer.resetStyle(e.target),
                     click: async (e) => {
-                        // Get a robust country name from properties
                         const props = feature.properties || {};
-                        const countryName =
-                            props.ADMIN || props.NAME || props.name || props.NAME_LONG || props.ADMIN_NAME || '';
+                        const name = props.ADMIN || props.NAME || props.name || props.NAME_LONG || props.ADMIN_NAME || '';
+                        // try several properties for ISO-A2/A3
+                        const iso = (props.ISO_A2 || props.ISO_A3 || props.iso_a2 || props.iso_a3 || props.ISO2 || props.ISO_A2__ || '').toString().trim();
 
-                        // Fetch revolutions for this country
-                        const q = apiUrl + '?country=' + encodeURIComponent(countryName);
+                        let q;
+                        if (iso) {
+                            q = apiUrl + '?countryIso=' + encodeURIComponent(iso);
+                        } else {
+                            q = apiUrl + '?country=' + encodeURIComponent(name);
+                        }
+
                         const r = await fetch(q);
-                        let content = `<strong>${countryName}</strong><br/>`;
+                        let content = `<strong>${name}${iso ? ' (' + iso + ')' : ''}</strong><br/>`;
                         if (!r.ok) {
                             content += `Error fetching data (${r.status})`;
                         } else {
@@ -98,11 +78,7 @@
                             }
                         }
 
-                        // Open popup at click location
-                        L.popup({ maxWidth: 450 })
-                            .setLatLng(e.latlng)
-                            .setContent(content)
-                            .openOn(map);
+                        L.popup({ maxWidth: 450 }).setLatLng(e.latlng).setContent(content).openOn(map);
                     }
                 });
             }
