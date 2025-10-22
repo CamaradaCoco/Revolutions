@@ -40,7 +40,6 @@
                 const d = new Date(isoString);
                 if (!isNaN(d)) return d.toLocaleDateString();
             } catch {}
-            // fallback: try to extract year
             const m = isoString.match(/^(\d{4})/);
             return m ? m[1] : isoString;
         }
@@ -54,7 +53,6 @@
             }
 
             html += `<div style="max-height:300px; overflow:auto; padding-right:6px;">`;
-            // sort by start date descending
             items.sort((a,b) => {
                 const da = a.startDate ? new Date(a.startDate).getTime() : 0;
                 const db = b.startDate ? new Date(b.startDate).getTime() : 0;
@@ -67,12 +65,70 @@
                 const end = it.endDate ? formatDateIso(it.endDate) : '';
                 const period = end ? `${start} — ${end}` : `${start}`;
                 const wdLink = it.wikidataId ? ` <a href="https://www.wikidata.org/wiki/${it.wikidataId}" target="_blank" rel="noopener">Wikidata</a>` : '';
-                // optional short description if present
                 const desc = it.description ? ` <div style="color:#444; font-size:0.9em; margin-top:0.25em;">${(it.description.length > 140) ? it.description.slice(0,140) + '…' : it.description}</div>` : '';
                 html += `<li style="margin-bottom:0.5em;"><strong>${it.name}</strong><br/><span style="font-size:0.9em;color:#333">${period}</span>${wdLink}${desc}</li>`;
             }
             html += '</ul></div></div>';
             return html;
+        }
+
+        // small iso3->iso2 map for common codes; extend if needed
+        const iso3ToIso2 = {
+            "USA":"US","GBR":"GB","RUS":"RU","CHN":"CN","FRA":"FR","DEU":"DE","ESP":"ES","ITA":"IT",
+            "CAN":"CA","AUS":"AU","BRA":"BR","MEX":"MX","JPN":"JP","KOR":"KR","IND":"IN","IRN":"IR"
+        };
+
+        async function fetchRevolutionsForIsoOrName(iso, name) {
+            console.log('Attempting fetch for', { iso, name });
+            // 1) try iso as-is
+            if (iso) {
+                let url = '/api/revolutions?countryIso=' + encodeURIComponent(iso);
+                console.log('Requesting', url);
+                let r = await fetch(url);
+                if (r.ok) {
+                    let list = await r.json();
+                    if (Array.isArray(list) && list.length > 0) {
+                        console.log('Got results for iso', iso, list.length);
+                        return list;
+                    }
+                } else {
+                    console.warn('API returned', r.status, 'for', url);
+                }
+
+                // 2) if iso is 3 chars, try iso3->iso2 mapping
+                if (iso.length === 3) {
+                    const iso2 = iso3ToIso2[iso.toUpperCase()];
+                    if (iso2) {
+                        let url2 = '/api/revolutions?countryIso=' + encodeURIComponent(iso2);
+                        console.log('Trying mapped iso2', url2);
+                        let r2 = await fetch(url2);
+                        if (r2.ok) {
+                            let list2 = await r2.json();
+                            if (Array.isArray(list2) && list2.length > 0) {
+                                console.log('Got results for iso2', iso2, list2.length);
+                                return list2;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3) fallback: try by country name (exact normalized server-side match may exist)
+            if (name) {
+                const urlName = '/api/revolutions?country=' + encodeURIComponent(name);
+                console.log('Falling back to name request', urlName);
+                let rn = await fetch(urlName);
+                if (rn.ok) {
+                    let listn = await rn.json();
+                    if (Array.isArray(listn) && listn.length > 0) {
+                        console.log('Got results by name', name, listn.length);
+                        return listn;
+                    }
+                }
+            }
+
+            console.log('No results for', { iso, name });
+            return [];
         }
 
         L.geoJSON(countries, {
@@ -87,17 +143,9 @@
                         L.popup().setLatLng(e.latlng).setContent(`<strong>${name}</strong><br/>No ISO available`).openOn(map);
                         return;
                     }
-                    // request exact ISO match from server
-                    const q = '/api/revolutions?countryIso=' + encodeURIComponent(iso);
-                    const r = await fetch(q);
-                    if (!r.ok) {
-                        console.error('API error', r.status);
-                        L.popup().setLatLng(e.latlng).setContent(`<strong>${name}</strong><br/>API error ${r.status}`).openOn(map);
-                        return;
-                    }
-                    const list = await r.json();
 
-                    // Defensive: ensure items have expected fields (name,startDate,endDate,description,wikidataId)
+                    const list = await fetchRevolutionsForIsoOrName(iso, name);
+
                     const safeList = Array.isArray(list) ? list.map(i => ({
                         name: i.name ?? '(unnamed)',
                         startDate: i.startDate ?? null,
