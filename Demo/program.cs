@@ -1,4 +1,7 @@
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Routing;
 using Demo.Data;
@@ -54,17 +57,15 @@ if (!app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
-// Serve static files before routing so map assets load
 app.UseStaticFiles();
-
-// Routing & middleware
 app.UseRouting();
-app.UseCors(); // enable CORS (dev)
+app.UseCors();
 app.UseAuthorization();
 
-// Diagnostics: quick health and route listing
+// Health
 app.MapGet("/ping", () => Results.Text("pong"));
+
+// Route listing
 app.MapGet("/routes", (EndpointDataSource ds) =>
 {
     var list = ds.Endpoints
@@ -75,23 +76,105 @@ app.MapGet("/routes", (EndpointDataSource ds) =>
     return Results.Json(list);
 });
 
+// Helper: normalize a string (remove diacritics, punctuation, collapse whitespace, lower)
+static string NormalizeName(string? s)
+{
+    if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+    s = s!.Trim();
+    // remove diacritics
+    var normalizedForm = s.Normalize(NormalizationForm.FormD);
+    var sb = new StringBuilder();
+    foreach (var ch in normalizedForm)
+    {
+        var uc = CharUnicodeInfo.GetUnicodeCategory(ch);
+        if (uc != UnicodeCategory.NonSpacingMark)
+            sb.Append(ch);
+    }
+    var noDiacritics = sb.ToString().Normalize(NormalizationForm.FormC);
+
+    // remove punctuation, replace dashes/slashes with spaces, collapse spaces
+    var cleaned = Regex.Replace(noDiacritics, @"[^\w\s]", " ");
+    cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+    return cleaned.ToLowerInvariant();
+}
+
 // API endpoint for the client map (register before Razor Pages)
 app.MapGet("/api/revolutions", async (RevolutionContext db, string? country, string? countryIso) =>
 {
-    var query = db.Revolutions.Where(r => r.StartDate.Year >= 1900);
-
+    // Fast path: exact ISO match if provided
     if (!string.IsNullOrWhiteSpace(countryIso))
     {
-        var iso = countryIso.Trim().ToUpper();
-        query = query.Where(r => r.CountryIso != null && r.CountryIso.ToUpper() == iso);
-    }
-    else if (!string.IsNullOrWhiteSpace(country))
-    {
-        var lowered = country.Trim().ToLower();
-        query = query.Where(r => r.Country != null && r.Country.ToLower().Contains(lowered));
+        var iso = countryIso.Trim().ToUpperInvariant();
+        var isoMatches = await db.Revolutions
+            .Where(r => r.CountryIso != null && r.CountryIso.ToUpper() == iso && r.StartDate.Year >= 1900)
+            .OrderByDescending(r => r.StartDate)
+            .Select(r => new {
+                r.Id,
+                r.Name,
+                r.StartDate,
+                r.EndDate,
+                r.Country,
+                r.CountryIso,
+                r.Latitude,
+                r.Longitude,
+                r.Type,
+                r.Description,
+                r.WikidataId
+            })
+            .ToListAsync();
+        return Results.Ok(isoMatches);
     }
 
-    var items = await query
+    // If a textual country name was supplied, perform tolerant matching.
+    if (!string.IsNullOrWhiteSpace(country))
+    {
+        var searchNorm = NormalizeName(country);
+
+        // Pull candidate rows from DB (only columns we need). Keep reasonable limit/perf.
+        var rows = await db.Revolutions
+            .Where(r => r.StartDate.Year >= 1900)
+            .Select(r => new {
+                r.Id,
+                r.Name,
+                r.StartDate,
+                r.EndDate,
+                r.Country,
+                r.CountryIso,
+                r.Latitude,
+                r.Longitude,
+                r.Type,
+                r.Description,
+                r.WikidataId
+            })
+            .ToListAsync();
+
+        // In-memory tolerant filter
+        var matches = rows.Where(r =>
+        {
+            var countryVal = NormalizeName(r.Country);
+            if (string.IsNullOrEmpty(countryVal)) return false;
+
+            // exact normalized equality or normalized contains
+            if (countryVal == searchNorm) return true;
+            if (countryVal.Contains(searchNorm)) return true;
+
+            // also try reverse: search contains part of countryVal (handles long geojson names)
+            if (searchNorm.Contains(countryVal)) return true;
+
+            // handle common prefixes like "Republic of", "Kingdom of" by stripping short words
+            var stripped = Regex.Replace(countryVal, @"\b(republic|kingdom|state|the|federation|of)\b", " ", RegexOptions.IgnoreCase);
+            stripped = Regex.Replace(stripped, @"\s+", " ").Trim();
+            if (!string.IsNullOrEmpty(stripped) && stripped.Contains(searchNorm)) return true;
+
+            return false;
+        }).OrderByDescending(r => r.StartDate).ToList();
+
+        return Results.Ok(matches);
+    }
+
+    // No filter: return all (bounded)
+    var all = await db.Revolutions
+        .Where(r => r.StartDate.Year >= 1900)
         .OrderByDescending(r => r.StartDate)
         .Select(r => new {
             r.Id,
@@ -108,11 +191,42 @@ app.MapGet("/api/revolutions", async (RevolutionContext db, string? country, str
         })
         .ToListAsync();
 
-    return Results.Ok(items);
-})
-.WithName("GetRevolutions");
+    return Results.Ok(all);
+}).WithName("GetRevolutions");
 
-// Map Razor Pages last
+// Diagnostic: sample rows
+app.MapGet("/debug/revolutions/sample", async (RevolutionContext db, int take = 20) =>
+{
+    var rows = await db.Revolutions
+        .OrderByDescending(r => r.StartDate)
+        .Take(take)
+        .Select(r => new { r.Id, r.Name, r.Country, r.CountryIso, r.StartDate, r.Latitude, r.Longitude })
+        .ToListAsync();
+    return Results.Ok(rows);
+});
+
+// Diagnostic: counts grouped by CountryIso
+app.MapGet("/debug/revolutions/counts", async (RevolutionContext db) =>
+{
+    var counts = await db.Revolutions
+        .GroupBy(r => r.CountryIso ?? "(null)")
+        .Select(g => new { CountryIso = g.Key, Count = g.Count() })
+        .OrderByDescending(x => x.Count)
+        .ToListAsync();
+    return Results.Ok(counts);
+});
+
+// Diagnostic: query by iso directly
+app.MapGet("/debug/revolutions/byiso/{iso}", async (RevolutionContext db, string iso) =>
+{
+    var items = await db.Revolutions
+        .Where(r => r.CountryIso != null && r.CountryIso.ToUpper() == iso.ToUpper())
+        .Select(r => new { r.Id, r.Name, r.Country, r.CountryIso, r.StartDate })
+        .ToListAsync();
+    return Results.Ok(items);
+});
+
+// Static assets and Razor Pages
 app.MapStaticAssets();
 app.MapRazorPages()
    .WithStaticAssets();
