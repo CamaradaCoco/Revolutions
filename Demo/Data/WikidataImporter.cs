@@ -14,48 +14,108 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
 
-        // Query: revolutions (wd:Q10931) since 2000, ordered by country then date.
-        // {limit} will be replaced by the caller for testing/paging.
-        private const string SparqlTemplate = @"#replaceLineBreaks
-SELECT DISTINCT ?revolution ?revolutionLabel ?country ?countryLabel ?startDate ?qid WHERE {
-  ?revolution wdt:P31/wdt:P279* wd:Q10931 .
-  ?revolution wdt:P17 ?country .
-  OPTIONAL { ?revolution wdt:P580 ?startDate. }
-  BIND(STRAFTER(STR(?revolution), 'http://www.wikidata.org/entity/') AS ?qid)
-  ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') .
-  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 2000)
-  SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
+        // Simple SPARQL for testing: filter by country label (case-insensitive contains) and year >= 1950
+        private const string SparqlTemplate = @"SELECT DISTINCT ?item ?itemLabel ?start ?end ?countryLabel ?countryIso ?qid WHERE {
+  ?item wdt:P31/wdt:P279* wd:Q34770.
+  ?item wdt:P580 ?start.
+  FILTER(YEAR(?start) >= 1950)
+  OPTIONAL { ?item wdt:P582 ?end. }
+  OPTIONAL {
+    ?item wdt:P17 ?country.
+    ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en').
+    OPTIONAL { ?country wdt:P297 ?countryIso. }
+    FILTER(CONTAINS(LCASE(?countryLabel), LCASE(""{country}"" )))
+  }
+  BIND(STRAFTER(STR(?item), 'http://www.wikidata.org/entity/') AS ?qid)
+  SERVICE wikibase:label { bd:serviceParam wikibase:language 'en'. }
 }
-ORDER BY ?countryLabel ?startDate
 LIMIT {limit}";
 
-        // Public entry used by Program.cs
-        public static Task<int> FetchAndImportAsync(RevolutionContext db, HttpClient? client = null, CancellationToken ct = default)
-            => FetchAndImportByLimitAsync(db, limit: 250, client: client, ct: ct);
-
-        // Single-page import (use small limit while testing in WDQS)
-        public static async Task<int> FetchAndImportByLimitAsync(RevolutionContext db, int limit = 250, HttpClient? client = null, CancellationToken ct = default)
+        /// <summary>
+        /// Convenience wrapper used by Program.cs. Performs a few small test imports by country.
+        /// Adjust the sampleCountries or implement a full import if you want production behavior.
+        /// </summary>
+        public static async Task<int> FetchAndImportAsync(RevolutionContext db, HttpClient? client = null, CancellationToken ct = default)
         {
             if (db is null) throw new ArgumentNullException(nameof(db));
-            if (limit <= 0) limit = 250;
 
             var createdClient = false;
-            if (client == null)
-            {
-                client = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate })
-                {
-                    Timeout = TimeSpan.FromSeconds(120)
-                };
-                createdClient = true;
-            }
-
             try
             {
+                if (client == null)
+                {
+                    client = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate })
+                    {
+                        Timeout = TimeSpan.FromSeconds(120)
+                    };
+                    createdClient = true;
+                }
+
+                // set a descriptive User-Agent per WDQS policy (replace with your contact)
                 try { client.DefaultRequestHeaders.UserAgent.ParseAdd("RevolutionsDataMap/0.1 (https://github.com/CamaradaCoco/Revolutions; elcosmith@hotmail.com)"); } catch { }
                 client.DefaultRequestHeaders.Accept.Clear();
                 client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/sparql-results+json"));
 
-                var query = SparqlTemplate.Replace("#replaceLineBreaks", "").Replace("{limit}", limit.ToString());
+                // Small sample set for testing — expand or replace with full import routine later
+                var sampleCountries = new[] { "United States", "France", "Russia", "China", "Iran" };
+                var total = 0;
+                foreach (var c in sampleCountries)
+                {
+                    // small limit to keep test quick; increase if you need more coverage
+                    var imported = await FetchAndImportForCountryAsync(db, c, limit: 25, client: client, ct: ct);
+                    total += imported;
+                    // polite pause between country queries
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+                }
+                return total;
+            }
+            finally
+            {
+                if (createdClient)
+                {
+                    try { client?.Dispose(); } catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Simple, single-page importer for testing. Searches Wikidata for revolutions since 1950
+        /// whose country label contains <paramref name="countryName"/> (case-insensitive).
+        /// </summary>
+        public static async Task<int> FetchAndImportForCountryAsync(
+            RevolutionContext db,
+            string countryName,
+            int limit = 50,
+            HttpClient? client = null,
+            CancellationToken ct = default)
+        {
+            if (db is null) throw new ArgumentNullException(nameof(db));
+            if (string.IsNullOrWhiteSpace(countryName)) throw new ArgumentException("countryName required", nameof(countryName));
+            if (limit <= 0) limit = 50;
+
+            var createdClient = false;
+            try
+            {
+                if (client == null)
+                {
+                    client = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate })
+                    {
+                        Timeout = TimeSpan.FromSeconds(60)
+                    };
+                    createdClient = true;
+                }
+
+                // Set a descriptive User-Agent per WDQS policy (replace with your contact)
+                try { client.DefaultRequestHeaders.UserAgent.ParseAdd("RevolutionsDataMap/0.1 (https://github.com/CamaradaCoco/Revolutions; elcosmith@hotmail.com)"); } catch { }
+                client.DefaultRequestHeaders.Accept.Clear();
+                client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/sparql-results+json"));
+
+                // basic escaping for embedded literal (sufficient for test)
+                static string SparqlEscape(string s) => s?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? string.Empty;
+
+                var query = SparqlTemplate
+                    .Replace("{country}", SparqlEscape(countryName))
+                    .Replace("{limit}", limit.ToString());
 
                 using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
                 {
@@ -81,60 +141,55 @@ LIMIT {limit}";
                     return 0;
                 }
 
-                var bindingArray = bindings.EnumerateArray().ToArray();
-                Console.WriteLine($"Wikidata import: fetched {bindingArray.Length} bindings (limit {limit}).");
-
-                // log a few sample bindings for inspection
-                for (int i = 0; i < Math.Min(6, bindingArray.Length); i++)
-                {
-                    var b = bindingArray[i];
-                    string sval(string n) => b.TryGetProperty(n, out var el) && el.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
-                    Console.WriteLine($"sample[{i}]: qid={sval("qid")} label={sval("revolutionLabel")} start={sval("startDate")} countryLabel={sval("countryLabel")}");
-                }
-
                 var imported = 0;
-                foreach (var b in bindingArray)
+                foreach (var b in bindings.EnumerateArray())
                 {
-                    static string get(JsonElement binding, string name)
+                    string get(string name)
                     {
-                        if (binding.TryGetProperty(name, out var el) && el.TryGetProperty("value", out var v))
+                        if (b.TryGetProperty(name, out var el) && el.TryGetProperty("value", out var v))
                             return v.GetString() ?? string.Empty;
                         return string.Empty;
                     }
 
-                    var qid = get(b, "qid");
-                    var label = get(b, "revolutionLabel");
-                    var startStr = get(b, "startDate");
-                    var countryLabel = get(b, "countryLabel");
+                    var qid = get("qid");
+                    var name = get("itemLabel");
+                    var startStr = get("start");
+                    var endStr = get("end");
+                    var country = get("countryLabel");
+                    var countryIso = get("countryIso");
 
-                    if (string.IsNullOrWhiteSpace(qid))
+                    if (!DateTime.TryParse(startStr, out var startDate)) continue;
+
+                    DateTime? endDate = null;
+                    if (DateTime.TryParse(endStr, out var tmp)) endDate = tmp;
+
+                    // Upsert: prefer WikidataId; fallback to Name+StartYear
+                    Revolution? entity = null;
+                    if (!string.IsNullOrWhiteSpace(qid))
                     {
-                        Console.Error.WriteLine("Skipping binding with no qid (ambiguous): label=" + label);
-                        continue;
-                    }
-                    if (!DateTime.TryParse(startStr, out var startDate))
-                    {
-                        Console.Error.WriteLine("Skipping binding with invalid startDate for qid=" + qid + " startStr=" + startStr);
-                        continue;
+                        entity = await db.Revolutions.FirstOrDefaultAsync(r => r.WikidataId == qid, ct);
                     }
 
-                    DateTime? endDate = null; // query didn't request end; keep null
-
-                    // Upsert by WikidataId (qid)
-                    Revolution? entity = await db.Revolutions.FirstOrDefaultAsync(r => r.WikidataId == qid, ct);
                     if (entity == null)
                     {
-                        entity = new Revolution { WikidataId = qid };
-                        db.Revolutions.Add(entity);
+                        entity = await db.Revolutions.FirstOrDefaultAsync(r => r.Name == name && r.StartDate.Year == startDate.Year, ct);
                     }
 
-                    entity.Name = string.IsNullOrWhiteSpace(label) ? qid : label;
+                    if (entity == null)
+                    {
+                        entity = new Revolution { WikidataId = string.IsNullOrWhiteSpace(qid) ? null : qid };
+                        db.Revolutions.Add(entity);
+                    }
+                    else if (string.IsNullOrWhiteSpace(entity.WikidataId) && !string.IsNullOrWhiteSpace(qid))
+                    {
+                        entity.WikidataId = qid;
+                    }
+
+                    entity.Name = name;
                     entity.StartDate = startDate;
                     entity.EndDate = endDate;
-                    entity.Country = countryLabel ?? string.Empty;
-                    entity.CountryIso = null;
-                    entity.Latitude = null;
-                    entity.Longitude = null;
+                    entity.Country = country ?? string.Empty;
+                    entity.CountryIso = string.IsNullOrWhiteSpace(countryIso) ? null : countryIso.ToUpperInvariant();
                     entity.Description = string.Empty;
                     entity.Type = "Revolution/Uprising";
                     entity.Sources = "Wikidata";
@@ -143,12 +198,15 @@ LIMIT {limit}";
                 }
 
                 await db.SaveChangesAsync(ct);
-                Console.WriteLine($"WikidataImporter: imported {imported} items.");
+                Console.WriteLine($"WikidataImporter: imported {imported} items for country '{countryName}'.");
                 return imported;
             }
             finally
             {
-                if (createdClient) client.Dispose();
+                if (createdClient)
+                {
+                    try { client?.Dispose(); } catch { }
+                }
             }
         }
     }
