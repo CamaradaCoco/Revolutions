@@ -24,7 +24,7 @@ builder.Services.AddDbContext<RevolutionContext>(options =>
 
 var app = builder.Build();
 
-// Run migrations and import (dev)
+// Run migrations and import (dev) - keep safe default import if desired
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<RevolutionContext>();
@@ -75,105 +75,40 @@ app.MapGet("/routes", (EndpointDataSource ds) =>
     return Results.Json(list);
 });
 
-// Helper: normalize a string (remove diacritics, punctuation, collapse whitespace, lower)
-static string NormalizeName(string? s)
+// API endpoint for the client map (exact ISO match only)
+app.MapGet("/api/revolutions", async (RevolutionContext db, string? countryIso) =>
 {
-    if (string.IsNullOrWhiteSpace(s)) return string.Empty;
-    s = s!.Trim();
-    // remove diacritics
-    var normalizedForm = s.Normalize(NormalizationForm.FormD);
-    var sb = new StringBuilder();
-    foreach (var ch in normalizedForm)
+    if (string.IsNullOrWhiteSpace(countryIso))
     {
-        var uc = CharUnicodeInfo.GetUnicodeCategory(ch);
-        if (uc != UnicodeCategory.NonSpacingMark)
-            sb.Append(ch);
-    }
-    var noDiacritics = sb.ToString().Normalize(NormalizationForm.FormC);
-
-    // remove punctuation, replace dashes/slashes with spaces, collapse spaces
-    var cleaned = Regex.Replace(noDiacritics, @"[^\w\s]", " ");
-    cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
-    return cleaned.ToLowerInvariant();
-}
-
-// API endpoint for the client map (register before Razor Pages)
-app.MapGet("/api/revolutions", async (RevolutionContext db, string? country, string? countryIso) =>
-{
-    // Fast path: exact ISO match if provided
-    if (!string.IsNullOrWhiteSpace(countryIso))
-    {
-        var iso = countryIso.Trim().ToUpperInvariant();
-        var isoMatches = await db.Revolutions
-            .Where(r => r.CountryIso != null && r.CountryIso.ToUpper() == iso && r.StartDate.Year >= 1900)
-            .OrderByDescending(r => r.StartDate)
-            .Select(r => new {
-                r.Id,
-                r.Name,
-                r.StartDate,
-                r.EndDate,
-                r.Country,
-                r.CountryIso,
-                r.Latitude,
-                r.Longitude,
-                r.Type,
-                r.Description,
-                r.WikidataId
-            })
-            .ToListAsync();
-        return Results.Ok(isoMatches);
+        // require exact ISO for correctness
+        return Results.BadRequest(new { error = "countryIso query parameter required (alpha-2 or alpha-3)" });
     }
 
-    // If a textual country name was supplied, perform tolerant matching.
-    if (!string.IsNullOrWhiteSpace(country))
+    var iso = countryIso.Trim().ToUpperInvariant();
+
+    // small iso3->iso2 mapping for common cases; extend as needed
+    static string? Iso3ToIso2(string iso3)
     {
-        var searchNorm = NormalizeName(country);
-
-        // Pull candidate rows from DB (only columns we need). Keep reasonable limit/perf.
-        var rows = await db.Revolutions
-            .Where(r => r.StartDate.Year >= 1900)
-            .Select(r => new {
-                r.Id,
-                r.Name,
-                r.StartDate,
-                r.EndDate,
-                r.Country,
-                r.CountryIso,
-                r.Latitude,
-                r.Longitude,
-                r.Type,
-                r.Description,
-                r.WikidataId
-            })
-            .ToListAsync();
-
-        // In-memory tolerant filter
-        var matches = rows.Where(r =>
+        if (string.IsNullOrWhiteSpace(iso3)) return null;
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            var countryVal = NormalizeName(r.Country);
-            if (string.IsNullOrEmpty(countryVal)) return false;
-
-            // exact normalized equality or normalized contains
-            if (countryVal == searchNorm) return true;
-            if (countryVal.Contains(searchNorm)) return true;
-
-            // also try reverse: search contains part of countryVal (handles long geojson names)
-            if (searchNorm.Contains(countryVal)) return true;
-
-            // handle common prefixes like "Republic of", "Kingdom of" by stripping short words
-            var stripped = Regex.Replace(countryVal, @"\b(republic|kingdom|state|the|federation|of)\b", " ", RegexOptions.IgnoreCase);
-            stripped = Regex.Replace(stripped, @"\s+", " ").Trim();
-            if (!string.IsNullOrEmpty(stripped) && stripped.Contains(searchNorm)) return true;
-
-            return false;
-        }).OrderByDescending(r => r.StartDate).ToList();
-
-        return Results.Ok(matches);
+            { "USA", "US" }, { "RUS", "RU" }, { "CHN", "CN" }, { "IRN", "IR" },
+            { "FRA", "FR" }, { "GBR", "GB" }, { "DEU", "DE" }, { "ESP", "ES" },
+            { "ITA", "IT" }, { "KOR", "KR" }, { "JPN", "JP" }, { "CAN", "CA" },
+            { "AUS", "AU" }, { "BRA", "BR" }, { "MEX", "MX" }, { "IND", "IN" }
+        };
+        return map.TryGetValue(iso3.ToUpperInvariant(), out var v) ? v : null;
     }
 
-    // No filter: return all (bounded)
-    var all = await db.Revolutions
-        .Where(r => r.StartDate.Year >= 1900)
+    var isoCandidates = new List<string> { iso };
+    if (iso.Length == 3)
+    {
+        var iso2 = Iso3ToIso2(iso);
+        if (!string.IsNullOrEmpty(iso2)) isoCandidates.Add(iso2);
+    }
+
+    var items = await db.Revolutions
+        .Where(r => r.StartDate.Year >= 1950 && r.CountryIso != null && isoCandidates.Contains(r.CountryIso!.ToUpper()))
         .OrderByDescending(r => r.StartDate)
         .Select(r => new {
             r.Id,
@@ -190,10 +125,10 @@ app.MapGet("/api/revolutions", async (RevolutionContext db, string? country, str
         })
         .ToListAsync();
 
-    return Results.Ok(all);
+    return Results.Ok(items);
 }).WithName("GetRevolutions");
 
-// Diagnostic: sample rows
+// Diagnostic endpoints (unchanged)
 app.MapGet("/debug/revolutions/sample", async (RevolutionContext db, int take = 20) =>
 {
     var rows = await db.Revolutions
@@ -204,7 +139,6 @@ app.MapGet("/debug/revolutions/sample", async (RevolutionContext db, int take = 
     return Results.Ok(rows);
 });
 
-// Diagnostic: counts grouped by CountryIso
 app.MapGet("/debug/revolutions/counts", async (RevolutionContext db) =>
 {
     var counts = await db.Revolutions
@@ -215,7 +149,6 @@ app.MapGet("/debug/revolutions/counts", async (RevolutionContext db) =>
     return Results.Ok(counts);
 });
 
-// Diagnostic: query by iso directly
 app.MapGet("/debug/revolutions/byiso/{iso}", async (RevolutionContext db, string iso) =>
 {
     var items = await db.Revolutions
