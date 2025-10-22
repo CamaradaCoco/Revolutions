@@ -19,6 +19,7 @@ SELECT ?item ?itemLabel ?start ?end ?countryLabel ?lat ?lon ?desc ?qid WHERE {
   FILTER(YEAR(?start) >= 1900)
   OPTIONAL { ?item wdt:P582 ?end. }          # end time
   OPTIONAL { ?item wdt:P17 ?country. }
+  OPTIONAL { ?country wdt:P297 ?countryIso. } # ISO
   OPTIONAL { ?item wdt:P625 ?coord. 
              BIND(geof:latitude(?coord) AS ?lat)
              BIND(geof:longitude(?coord) AS ?lon)
@@ -65,6 +66,7 @@ LIMIT 1000";
                 var startStr = get("start");
                 var endStr = get("end");
                 var country = get("countryLabel");
+                var countryIso = get("countryIso");
                 var desc = get("desc");
                 var latStr = get("lat");
                 var lonStr = get("lon");
@@ -95,6 +97,7 @@ LIMIT 1000";
                 entity.StartDate = startDate;
                 entity.EndDate = endDate;
                 entity.Country = country ?? string.Empty;
+                entity.CountryIso = string.IsNullOrEmpty(countryIso) ? null : countryIso.ToUpperInvariant();
                 entity.Latitude = lat;
                 entity.Longitude = lon;
                 entity.Description = desc ?? string.Empty;

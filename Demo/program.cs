@@ -76,10 +76,20 @@ app.MapGet("/routes", (EndpointDataSource ds) =>
 });
 
 // API endpoint for the client map (register before Razor Pages)
-app.MapGet("/api/revolutions", async (RevolutionContext db) =>
+app.MapGet("/api/revolutions", async (RevolutionContext db, string? country) =>
 {
-    var items = await db.Revolutions
-        .Where(r => r.StartDate.Year >= 1900)
+    // base query (since 1900)
+    var query = db.Revolutions.Where(r => r.StartDate.Year >= 1900);
+
+    if (!string.IsNullOrWhiteSpace(country))
+    {
+        var lowered = country.Trim().ToLower();
+        // case-insensitive contains via ToLower() - EF Core will translate this
+        query = query.Where(r => r.Country != null && r.Country.ToLower().Contains(lowered));
+    }
+
+    var items = await query
+        .OrderByDescending(r => r.StartDate)
         .Select(r => new {
             r.Id,
             r.Name,
@@ -93,8 +103,10 @@ app.MapGet("/api/revolutions", async (RevolutionContext db) =>
             r.WikidataId
         })
         .ToListAsync();
+
     return Results.Ok(items);
-});
+})
+.WithName("GetRevolutions");
 
 // Map Razor Pages last
 app.MapStaticAssets();

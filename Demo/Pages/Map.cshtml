@@ -16,18 +16,100 @@
     }).addTo(map);
 
     const apiUrl = '@Url.Content("~/api/revolutions")';
+
+    // load the event markers (existing behaviour)
     const res = await fetch(apiUrl);
     if (!res.ok) {
         console.error('Fetch failed', res.status, await res.text());
         return;
     }
     const data = await res.json();
-
+    const markerLayer = L.layerGroup().addTo(map);
     data.forEach(item => {
         if (item.latitude && item.longitude) {
             const popup = `<strong>${item.name}</strong><br/>${new Date(item.startDate).getFullYear()} - ${item.endDate ? new Date(item.endDate).getFullYear() : ''}<br/>${item.country || ''}<br/><a href="https://www.wikidata.org/wiki/${item.wikidataId}" target="_blank">Wikidata</a>`;
-            L.marker([item.latitude, item.longitude]).addTo(map).bindPopup(popup);
+            L.marker([item.latitude, item.longitude]).addTo(markerLayer).bindPopup(popup);
         }
     });
+
+    // load country GeoJSON and wire up click handler
+    // Source: datasets/geo-countries (raw github). You may swap to another reliable source if needed.
+    const geojsonUrl = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson';
+    try {
+        const g = await fetch(geojsonUrl);
+        if (!g.ok) {
+            console.warn('Could not load country GeoJSON', g.status);
+            return;
+        }
+        const countries = await g.json();
+
+        function styleDefault() {
+            return {
+                color: '#3388ff',
+                weight: 1,
+                fillColor: '#3388ff',
+                fillOpacity: 0.05
+            };
+        }
+        function styleHighlight() {
+            return {
+                color: '#ff7800',
+                weight: 2,
+                fillColor: '#ffecb3',
+                fillOpacity: 0.35
+            };
+        }
+
+        let countryLayer = L.geoJSON(countries, {
+            style: styleDefault,
+            onEachFeature: (feature, layer) => {
+                layer.on({
+                    mouseover: (e) => {
+                        e.target.setStyle(styleHighlight());
+                    },
+                    mouseout: (e) => {
+                        countryLayer.resetStyle(e.target);
+                    },
+                    click: async (e) => {
+                        // Get a robust country name from properties
+                        const props = feature.properties || {};
+                        const countryName =
+                            props.ADMIN || props.NAME || props.name || props.NAME_LONG || props.ADMIN_NAME || '';
+
+                        // Fetch revolutions for this country
+                        const q = apiUrl + '?country=' + encodeURIComponent(countryName);
+                        const r = await fetch(q);
+                        let content = `<strong>${countryName}</strong><br/>`;
+                        if (!r.ok) {
+                            content += `Error fetching data (${r.status})`;
+                        } else {
+                            const list = await r.json();
+                            if (!list || list.length === 0) {
+                                content += 'No recorded revolutions since 1900.';
+                            } else {
+                                content += '<ul style="margin:0; padding-left:18px;">';
+                                list.forEach(it => {
+                                    const start = new Date(it.startDate).getFullYear();
+                                    const end = it.endDate ? new Date(it.endDate).getFullYear() : '';
+                                    const wikidata = it.wikidataId ? `<a href="https://www.wikidata.org/wiki/${it.wikidataId}" target="_blank">Wikidata</a>` : '';
+                                    content += `<li><strong>${it.name}</strong> (${start}${end ? '–' + end : ''}) ${wikidata}</li>`;
+                                });
+                                content += '</ul>';
+                            }
+                        }
+
+                        // Open popup at click location
+                        L.popup({ maxWidth: 450 })
+                            .setLatLng(e.latlng)
+                            .setContent(content)
+                            .openOn(map);
+                    }
+                });
+            }
+        }).addTo(map);
+
+    } catch (ex) {
+        console.error('Error loading countries GeoJSON', ex);
+    }
 })();
 </script>
