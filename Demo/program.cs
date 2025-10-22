@@ -90,7 +90,8 @@ app.MapGet("/api/revolutions", async (RevolutionContext db, string? country, str
             { "USA","US" }, { "GBR","GB" }, { "RUS","RU" }, { "CHN","CN" },
             { "FRA","FR" }, { "DEU","DE" }, { "ESP","ES" }, { "ITA","IT" },
             { "CAN","CA" }, { "AUS","AU" }, { "BRA","BR" }, { "MEX","MX" },
-            { "JPN","JP" }, { "KOR","KR" }, { "IND","IN" }, { "IRN","IR" }
+            { "JPN","JP" }, { "KOR","KR" }, { "IND","IN" }, { "IRN","IR" },
+            { "SYR","SY" } // <---- add this line so iso3 SYR maps to alpha-2 SY
         };
         return map.TryGetValue(iso3.ToUpperInvariant(), out var v) ? v : null;
     }
